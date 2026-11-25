@@ -1,0 +1,73 @@
+# Airflow 3 lokal (LocalExecutor + Postgres) untuk pipeline OpenAQ -> DuckDB.
+#   docker compose up airflow-init     # sekali di awal
+#   docker compose up -d               # UI: http://localhost:8089
+x-airflow-common: &airflow-common
+  build: .
+  image: openaq-airflow:latest
+  env_file: .env                       # OPENAQ_API_KEY
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
+    AIRFLOW__API_AUTH__JWT_SECRET: local-dev-only-change-me
+    # Dev lokal: tanpa login, semua user dianggap admin.
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "true"
+    PYTHONPATH: /opt/airflow
+    OPENAQ_DB_PATH: /opt/airflow/data/openaq.duckdb
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./Handler:/opt/airflow/Handler
+    - ./data:/opt/airflow/data         # openaq.duckdb tersimpan di host
+    - ./logs:/opt/airflow/logs
+  user: "50000:0"
+  depends_on: &airflow-depends
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:18.7-trixie
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db:/var/lib/postgresql   # Postgres 18+: mount di parent dir, bukan /data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+    restart: always
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command: -c "airflow db migrate"
+    restart: "no"
+
+  airflow-apiserver:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      - "8089:8080"   # host 8089 -> api-server di container (default 8080)
+    restart: always
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    restart: always
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    restart: always
+
+  airflow-triggerer:
+    <<: *airflow-common
+    command: triggerer
+    restart: always
+
+volumes:
+  postgres-db:
