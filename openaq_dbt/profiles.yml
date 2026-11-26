@@ -1,0 +1,9 @@
+# dbt mencari profiles.yml di direktori kerja, jadi jalankan dbt dari folder openaq_dbt/.
+# Lokal: ../data/openaq.duckdb. Di container Airflow: env OPENAQ_DB_PATH.
+openaq_dbt:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: "{{ env_var('OPENAQ_DB_PATH', '../data/openaq.duckdb') }}"
+      threads: 1   # DuckDB: satu file, satu penulis

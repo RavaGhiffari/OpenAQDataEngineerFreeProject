@@ -1,4 +1,7 @@
-"""Memuat data mentah OpenAQ ke DuckDB (schema `raw`). Idempotent: upsert by primary key."""
+"""Memuat data mentah OpenAQ ke DuckDB (schema `raw`). Idempotent: upsert by primary key.
+
+`_loaded_at` di-set eksplisit: INSERT OR REPLACE tidak memakai DEFAULT saat baris sudah ada.
+"""
 import json
 import os
 from collections.abc import Iterable
@@ -98,15 +101,15 @@ def load_locations(con: duckdb.DuckDBPyConnection, locations: Iterable[dict]) ->
     con.executemany(
         """INSERT OR REPLACE INTO raw.locations
            (location_id, name, country_code, timezone, latitude, longitude, is_mobile,
-            is_monitor, provider_name, datetime_first_utc, datetime_last_utc, payload)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            is_monitor, provider_name, datetime_first_utc, datetime_last_utc, payload, _loaded_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?, now())""",
         loc_rows,
     )
     if sensor_rows:
         con.executemany(
             """INSERT OR REPLACE INTO raw.sensors
-               (sensor_id, location_id, name, parameter_id, parameter_name, units)
-               VALUES (?,?,?,?,?,?)""",
+               (sensor_id, location_id, name, parameter_id, parameter_name, units, _loaded_at)
+               VALUES (?,?,?,?,?,?, now())""",
             sensor_rows,
         )
     return len(loc_rows), len(sensor_rows)
@@ -129,8 +132,8 @@ def load_hours(con: duckdb.DuckDBPyConnection, sensor_id: int, rows: Iterable[di
     con.executemany(
         """INSERT OR REPLACE INTO raw.measurements_hourly
            (sensor_id, datetime_from_utc, datetime_to_utc, value, parameter_name, units,
-            min, max, avg, sd, percent_coverage, has_flags, payload)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            min, max, avg, sd, percent_coverage, has_flags, payload, _loaded_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, now())""",
         data,
     )
     return len(data)

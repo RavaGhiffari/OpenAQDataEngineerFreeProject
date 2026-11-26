@@ -1,0 +1,24 @@
+version: 2
+
+sources:
+  - name: openaq
+    description: Data mentah OpenAQ API v3, dimuat oleh Handler/loader.py (DAG openaq_ingest).
+    schema: raw
+    config:
+      loaded_at_field: _loaded_at
+      freshness:
+        warn_after: {count: 2, period: day}
+        error_after: {count: 4, period: day}
+    tables:
+      - name: locations
+        columns:
+          - name: location_id
+            data_tests: [unique, not_null]
+      - name: sensors
+        columns:
+          - name: sensor_id
+            data_tests: [unique, not_null]
+      - name: measurements_hourly
+        columns:
+          - name: sensor_id
+            data_tests: [not_null]

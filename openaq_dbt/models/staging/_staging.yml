@@ -1,0 +1,45 @@
+version: 2
+
+models:
+  - name: stg_openaq__locations
+    description: Satu baris per lokasi pemantauan OpenAQ.
+    columns:
+      - name: location_id
+        data_tests: [unique, not_null]
+      - name: timezone
+        data_tests: [not_null]
+      - name: latitude
+        data_tests: [not_null]
+      - name: longitude
+        data_tests: [not_null]
+
+  - name: stg_openaq__sensors
+    description: Satu baris per sensor (satu parameter per sensor).
+    columns:
+      - name: sensor_id
+        data_tests: [unique, not_null]
+      - name: location_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_openaq__locations')
+                field: location_id
+
+  - name: stg_openaq__measurements_hourly
+    description: Agregat per jam per sensor dari endpoint /sensors/{id}/hours.
+    columns:
+      - name: sensor_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_openaq__sensors')
+                field: sensor_id
+      - name: measured_at_utc
+        data_tests: [not_null]
+      - name: value
+        data_tests:
+          - non_negative:
+              config:
+                severity: warn

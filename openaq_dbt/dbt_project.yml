@@ -1,0 +1,25 @@
+name: openaq_dbt
+version: "1.0.0"
+config-version: 2
+profile: openaq_dbt
+
+model-paths: ["models"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+seed-paths: ["seeds"]
+analysis-paths: ["analyses"]
+target-path: target
+clean-targets: ["target", "dbt_packages"]
+
+models:
+  openaq_dbt:
+    staging:
+      +schema: staging
+      +materialized: view
+    marts:
+      +schema: marts
+      +materialized: table
+
+vars:
+  # Ambang ISPU PM2.5 rata-rata 24 jam (ug/m3), Permen LHK No. 14/2020.
+  ispu_pm25_breakpoints: [15.5, 55.4, 150.4, 250.4]

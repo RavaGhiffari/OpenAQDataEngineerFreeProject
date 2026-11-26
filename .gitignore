@@ -7,3 +7,5 @@ __pycache__/data/
 *.duckdb.wal
 Handler/__pycache__
 __pycache__/
+dbt_packages/
+openaq_dbt/.user.yml

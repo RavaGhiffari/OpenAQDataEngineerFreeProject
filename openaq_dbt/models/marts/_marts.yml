@@ -1,0 +1,41 @@
+version: 2
+
+models:
+  - name: dim_locations
+    description: Dimensi lokasi pemantauan; is_active = kirim data dalam 7 hari terakhir.
+    columns:
+      - name: location_id
+        data_tests: [unique, not_null]
+
+  - name: dim_sensors
+    columns:
+      - name: sensor_id
+        data_tests: [unique, not_null]
+
+  - name: fct_pm25_hourly
+    description: Grain = sensor x jam (UTC). Lihat tests/assert_hourly_grain_unique.sql.
+    columns:
+      - name: sensor_id
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_sensors')
+                field: sensor_id
+      - name: pm25_ugm3
+        data_tests: [not_null, non_negative]
+
+  - name: fct_pm25_daily
+    description: Grain = lokasi x tanggal lokal.
+    columns:
+      - name: location_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_locations')
+                field: location_id
+      - name: ispu_category
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['Baik', 'Sedang', 'Tidak Sehat', 'Sangat Tidak Sehat', 'Berbahaya']
