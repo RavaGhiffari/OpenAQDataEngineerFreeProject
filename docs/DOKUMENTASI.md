@@ -103,7 +103,7 @@ OpenAQProject/
 ├── openaq_dbt/                  # Proyek dbt (Transform)
 │   ├── dbt_project.yml          #   Konfigurasi proyek + variabel ISPU
 │   ├── profiles.yml             #   Koneksi dbt ke file DuckDB
-│   ├── macros/generate_schema_name.sql
+│   ├── macros/                  #   generate_schema_name, as_of_utc
 │   ├── models/staging/          #   Lapis staging (view)
 │   ├── models/marts/            #   Lapis marts (table)
 │   └── tests/                   #   Test data custom
@@ -114,6 +114,9 @@ OpenAQProject/
 ├── .dockerignore                # File yang tidak ikut ke image
 ├── requirements.txt             # Library untuk venv lokal (dev)
 ├── requirements-airflow.txt     # Library tambahan untuk image Airflow
+├── tests/                       # Unit test Python (pytest) untuk Handler/
+├── pyproject.toml               # Konfigurasi pytest
+├── .github/workflows/ci.yml     # CI: pytest + dbt build di setiap push/PR
 ├── data/openaq.duckdb           # Database hasil (tidak di-commit)
 └── scripts/                     # Coretan, jalankan dari root: python -m scripts.<nama>
     ├── explore_api.py           # Eksplorasi API
@@ -159,7 +162,8 @@ docker compose up
         └─ DAG openaq_ingest
              ├─ task 1: load_locations_task  → client.locations() → loader.load_locations()
              ├─ task 2: load_hours_task      → client.hours()     → loader.load_hours()
-             └─ task 3: dbt_build_task       → dbt build (run model + test)
+             ├─ task 3: dbt_source_freshness_task → dbt source freshness (data masih baru?)
+             └─ task 4: dbt_build_task       → dbt build --vars as_of_utc (run model + test)
 ```
 
 ---
@@ -559,7 +563,8 @@ Konvensi nama:
 #### `dim_locations.sql`
 ```sql
 select ...,
-    last_seen_at_utc >= (now() at time zone 'UTC') - interval 7 day  as is_active,
+    {{ as_of_utc() }}                                      as as_of_utc,
+    last_seen_at_utc >= {{ as_of_utc() }} - interval 7 day as is_active,
     coalesce(
         latitude between -11.5 and 6.5 and longitude between 94.5 and 141.5,
         false
@@ -567,7 +572,8 @@ select ...,
 from {{ ref('stg_openaq__locations') }}
 ```
 - `ref('...')` memberi tahu dbt bahwa model ini bergantung pada `stg_openaq__locations`, sehingga model itu dibangun duluan.
-- `is_active`: lokasi yang mengirim data dalam 7 hari terakhir (dihitung saat dbt dijalankan).
+- `is_active`: lokasi yang mengirim data dalam 7 hari sebelum **waktu acuan** `as_of_utc`. Macro `macros/as_of_utc.sql` membaca var dbt `as_of_utc`, yang dikirim Airflow berisi `data_interval_end`. Kalau var tidak ada (dbt dijalankan manual di laptop), fallback ke `now()`.
+  > **Pola pikir DE:** model sebaiknya **deterministik**: input sama + run sama → output sama. Dengan `now()`, menjalankan ulang run tanggal 1 pada tanggal 10 memberi `is_active` yang berbeda. Dengan waktu acuan dari run, rerun dan backfill konsisten. Kolom `as_of_utc` ikut disimpan supaya pemakai tabel tahu acuannya.
 - `is_within_indonesia`: **aturan kualitas data**. OpenAQ kadang salah tag negara (mis. lokasi 6315887 di Bulgaria bertag `ID`). Bounding box kasar Indonesia (lintang −11.5 s/d 6.5, bujur 94.5 s/d 141.5) dipakai untuk menyaringnya. `coalesce(..., false)` membuat koordinat kosong dianggap di luar.
 
 #### `dim_sensors.sql`
@@ -719,12 +725,12 @@ def load_hours_task(**context) -> int:
         SELECT s.sensor_id
         FROM raw.sensors s JOIN raw.locations l USING (location_id)
         WHERE s.parameter_name = ?
-          AND l.datetime_last_utc >= now() - to_days(CAST(? AS INTEGER))
+          AND l.datetime_last_utc >= CAST(? AS TIMESTAMPTZ) - to_days(CAST(? AS INTEGER))
         ORDER BY s.sensor_id
-    """, [PARAMETER, ACTIVE_WITHIN_DAYS]).fetchall()]
+    """, [PARAMETER, date_to, ACTIVE_WITHIN_DAYS]).fetchall()]
 ```
 - Daftar sensor diambil dari **hasil task 1** di `raw`. Inilah alasan task 2 harus jalan setelah task 1.
-- Hanya sensor **PM2.5** di lokasi yang **aktif 7 hari terakhir**. Sensor mati tidak perlu ditanya, sehingga request ke API dan kuota rate limit lebih hemat.
+- Hanya sensor **PM2.5** di lokasi yang **aktif dalam 7 hari sebelum akhir window** (`date_to`, bukan `now()`). Sensor mati tidak perlu ditanya, sehingga request ke API dan kuota rate limit lebih hemat. Karena acuannya akhir window, backfill tanggal lama tetap memilih sensor yang aktif pada periode itu.
 
 ```python
     with OpenAQClient() as client:
@@ -735,24 +741,38 @@ def load_hours_task(**context) -> int:
 - Satu request (atau lebih, kalau ada paginasi) per sensor untuk jendela waktu run itu.
 - Karena upsert, kalau task ini di-retry atau run diulang, tidak ada data yang dobel.
 
-### 9.6 Task 3: `dbt_build_task`
+### 9.6 Task 3: `dbt_source_freshness_task`
 
 ```python
 @task.bash(retries=0)
-def dbt_build_task() -> str:
-    return ('cd "$DBT_PROJECT_DIR" && '
-            "/opt/dbt_venv/bin/dbt build "
-            "--target-path /tmp/dbt_target --log-path /tmp/dbt_logs")
+def dbt_source_freshness_task() -> str:
+    return f'cd "$DBT_PROJECT_DIR" && {DBT} source freshness {DBT_PATHS}'
+```
+- Memeriksa **seberapa baru** data di `raw` sebelum diolah. Aturannya ada di `_sources.yml`:
+  - `locations` dan `sensors`: diukur dari `_loaded_at` (kapan loader terakhir menulis). Warn > 2 hari, error > 4 hari.
+  - `measurements_hourly`: diukur dari **`datetime_from_utc`**, yaitu jam pengukuran terbaru. Warn > 1 hari, error > 3 hari. Normalnya data telat sekitar 2 jam.
+- Kenapa `measurements_hourly` tidak memakai `_loaded_at`? Karena task freshness jalan **tepat setelah** loader, sehingga `_loaded_at` selalu baru dan cek-nya tidak berarti. Yang ingin kita tangkap adalah kasus "loader sukses, tapi API tidak mengirim jam baru" (sensor mati massal, API bermasalah).
+- `warn` hanya tercatat di log; `error` menggagalkan task sehingga `dbt_build_task` tidak jalan.
+
+### 9.7 Task 4: `dbt_build_task`
+
+```python
+@task.bash(retries=0)
+def dbt_build_task(**context) -> str:
+    as_of = (context.get("data_interval_end") or pendulum.now("UTC")).isoformat()
+    vars_json = json.dumps({"as_of_utc": as_of})
+    return f"cd \"$DBT_PROJECT_DIR\" && {DBT} build {DBT_PATHS} --vars '{vars_json}'"
 ```
 - **`@task.bash`**: fungsi mengembalikan **string perintah shell**, lalu Airflow yang menjalankannya.
+- **`--vars`**: mengirim `as_of_utc` = akhir data interval ke dbt, sehingga `is_active` di `dim_locations` deterministik per run (lihat 8.7).
 - **`/opt/dbt_venv/bin/dbt`**: dbt dari virtualenv terpisah (lihat Dockerfile).
 - **`--target-path /tmp/...`**: file hasil kompilasi dbt ditaruh di `/tmp` container, supaya folder proyek yang di-mount dari laptop tetap bersih.
 - **`retries=0`**: kalau dbt gagal, penyebabnya biasanya **test data gagal**, yaitu masalah data, bukan gangguan sementara. Retry tidak akan membantu, jadi lebih baik langsung gagal supaya diperiksa.
 
-### 9.7 Dependensi
+### 9.8 Dependensi
 
 ```python
-load_locations_task() >> load_hours_task() >> dbt_build_task()
+load_locations_task() >> load_hours_task() >> dbt_source_freshness_task() >> dbt_build_task()
 openaq_ingest()   # panggil fungsi DAG supaya terdaftar di Airflow
 ```
 `>>` artinya "kanan jalan setelah kiri sukses".
@@ -911,6 +931,18 @@ cd ..
 streamlit run dashboard/app.py          # http://localhost:8501
 ```
 
+### 12.2b Menjalankan test
+```powershell
+pip install -r requirements.txt         # sudah termasuk pytest + dbt
+pytest                                  # unit test Handler/ (tanpa jaringan, DuckDB in-memory)
+cd openaq_dbt
+dbt source freshness                    # data di raw masih baru?
+dbt build --vars '{"as_of_utc": "2026-11-28T00:00:00+00:00"}'   # opsional: waktu acuan tetap
+```
+- `tests/test_client.py` mengganti transport HTTP dengan `httpx.MockTransport`, jadi paginasi, retry 5xx, dan rate limit 429 bisa dites tanpa memanggil API sungguhan. `time.sleep` di-patch supaya test tidak menunggu.
+- `tests/test_loader.py` memakai `connect(":memory:")`, sehingga file `data/openaq.duckdb` tidak tersentuh. Yang dites: upsert idempotent, `_loaded_at` ikut diperbarui saat upsert (regresi bug lama), dan field opsional yang hilang.
+- Di GitHub, `.github/workflows/ci.yml` menjalankan `pytest` lalu `dbt build` di DuckDB kosong setiap push ke `main` dan setiap PR.
+
 ### 12.3 Jalur B: dengan Airflow di Docker (seperti produksi)
 ```powershell
 docker compose build                    # build image (ulang bila Dockerfile/requirements berubah)
@@ -938,13 +970,12 @@ Bagian ini sengaja ditulis supaya kamu tahu **apa yang bisa dikembangkan sendiri
 
 | Keterbatasan saat ini | Ide perbaikan |
 |---|---|
-| `dbt source freshness` tidak dijalankan di DAG | Tambahkan task `dbt source freshness` sebelum `dbt build` |
 | Kategori ISPU hanya berdasarkan batas, bukan angka indeks ISPU | Hitung nilai ISPU dengan rumus interpolasi linear dari Permen LHK |
-| `is_active` dihitung relatif terhadap `now()` saat dbt jalan, sehingga hasilnya berubah walaupun data tidak berubah | Simpan tanggal acuan dari run Airflow (mis. lewat `var`) |
 | Request per sensor berjalan berurutan | Paralelkan request HTTP, tapi tetap satu penulis ke DuckDB |
 | Hanya PM2.5 | Jadikan `PARAMETER` daftar (pm10, o3, …) |
 | Backfill sejarah belum otomatis | Pakai `catchup=True` atau `airflow dags backfill` dengan rentang tanggal |
-| Belum ada unit test Python | Tes `_g`, `load_locations` dengan data palsu + DuckDB in-memory (`duckdb.connect(":memory:")`) |
+| Belum ada test untuk DAG Airflow itu sendiri | Tes import DAG (`DagBag`) dan urutan task, dijalankan di image Airflow |
+| CI hanya menjalankan dbt di DB kosong, sehingga test data tidak benar-benar diuji | Tambahkan seed/fixture data kecil untuk `raw.*` di CI |
 | Secret dev (`JWT_SECRET`, tanpa login) | Untuk deployment sungguhan: secret dari env/secret manager, aktifkan auth |
 
 ---
