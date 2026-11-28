@@ -1,9 +1,10 @@
 """DAG harian: ingest OpenAQ (locations, sensors, hourly PM2.5) ke DuckDB schema `raw`,
-lalu transformasi dbt (staging -> marts).
+lalu cek freshness source dan transformasi dbt (staging -> marts).
 
 Catatan DuckDB: hanya satu proses boleh menulis ke file .duckdb. Karena itu task berjalan
 berurutan dan max_active_runs=1. Setiap task membuka lalu menutup koneksinya sendiri.
 """
+import json
 from datetime import datetime, timedelta
 
 import pendulum
@@ -12,6 +13,9 @@ from airflow.sdk import dag, task
 COUNTRY_ID = 1          # Indonesia
 PARAMETER = "pm25"
 ACTIVE_WITHIN_DAYS = 7  # hanya sensor yang lokasinya masih kirim data belakangan ini
+
+DBT = "/opt/dbt_venv/bin/dbt"
+DBT_PATHS = "--target-path /tmp/dbt_target --log-path /tmp/dbt_logs"
 
 
 @dag(
@@ -59,10 +63,12 @@ def openaq_ingest():
                 SELECT s.sensor_id
                 FROM raw.sensors s JOIN raw.locations l USING (location_id)
                 WHERE s.parameter_name = ?
-                  AND l.datetime_last_utc >= now() - to_days(CAST(? AS INTEGER))
+                  AND l.datetime_last_utc >= CAST(? AS TIMESTAMPTZ) - to_days(CAST(? AS INTEGER))
                 ORDER BY s.sensor_id
                 """,
-                [PARAMETER, ACTIVE_WITHIN_DAYS],
+                # Relatif ke akhir window (bukan now()) agar rerun/backfill tanggal lama
+                # tetap memilih sensor yang aktif pada periode itu.
+                [PARAMETER, date_to, ACTIVE_WITHIN_DAYS],
             ).fetchall()]
             print(f"{len(sensor_ids)} sensor {PARAMETER} aktif")
 
@@ -76,17 +82,29 @@ def openaq_ingest():
             con.close()
         return total
 
-    @task.bash(retries=0)  # test gagal = masalah data, bukan error sementara; retry tidak membantu
-    def dbt_build_task() -> str:
-        # target/ dan logs/ ditaruh di /tmp agar folder project yang di-mount dari host tetap bersih.
-        # `dbt build` = run + test sesuai urutan DAG; test gagal -> task gagal.
-        return (
-            'cd "$DBT_PROJECT_DIR" && '
-            "/opt/dbt_venv/bin/dbt build "
-            "--target-path /tmp/dbt_target --log-path /tmp/dbt_logs"
-        )
+    # Task dbt: retries=0 karena gagal = masalah data, bukan error sementara; retry tidak membantu.
+    # target/ dan logs/ ditaruh di /tmp agar folder project yang di-mount dari host tetap bersih.
 
-    load_locations_task() >> load_hours_task() >> dbt_build_task()
+    @task.bash(retries=0)
+    def dbt_source_freshness_task() -> str:
+        # Gagal (error_after di _sources.yml) bila API berhenti mengirim jam baru,
+        # walaupun task load sendiri sukses. Warn tidak menggagalkan task.
+        return f'cd "$DBT_PROJECT_DIR" && {DBT} source freshness {DBT_PATHS}'
+
+    @task.bash(retries=0)
+    def dbt_build_task(**context) -> str:
+        # `dbt build` = run + test sesuai urutan DAG; test gagal -> task gagal.
+        # as_of_utc = akhir data interval -> is_active dkk deterministik per run.
+        as_of = (context.get("data_interval_end") or pendulum.now("UTC")).isoformat()
+        vars_json = json.dumps({"as_of_utc": as_of})
+        return f"cd \"$DBT_PROJECT_DIR\" && {DBT} build {DBT_PATHS} --vars '{vars_json}'"
+
+    (
+        load_locations_task()
+        >> load_hours_task()
+        >> dbt_source_freshness_task()
+        >> dbt_build_task()
+    )
 
 
 openaq_ingest()
