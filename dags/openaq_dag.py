@@ -1,4 +1,5 @@
-"""DAG harian: ingest OpenAQ (locations, sensors, hourly PM2.5) ke DuckDB schema `raw`.
+"""DAG harian: ingest OpenAQ (locations, sensors, hourly PM2.5) ke DuckDB schema `raw`,
+lalu transformasi dbt (staging -> marts).
 
 Catatan DuckDB: hanya satu proses boleh menulis ke file .duckdb. Karena itu task berjalan
 berurutan dan max_active_runs=1. Setiap task membuka lalu menutup koneksinya sendiri.
@@ -75,7 +76,17 @@ def openaq_ingest():
             con.close()
         return total
 
-    load_locations_task() >> load_hours_task()
+    @task.bash(retries=0)  # test gagal = masalah data, bukan error sementara; retry tidak membantu
+    def dbt_build_task() -> str:
+        # target/ dan logs/ ditaruh di /tmp agar folder project yang di-mount dari host tetap bersih.
+        # `dbt build` = run + test sesuai urutan DAG; test gagal -> task gagal.
+        return (
+            'cd "$DBT_PROJECT_DIR" && '
+            "/opt/dbt_venv/bin/dbt build "
+            "--target-path /tmp/dbt_target --log-path /tmp/dbt_logs"
+        )
+
+    load_locations_task() >> load_hours_task() >> dbt_build_task()
 
 
 openaq_ingest()

@@ -16,9 +16,13 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "true"
     PYTHONPATH: /opt/airflow
     OPENAQ_DB_PATH: /opt/airflow/data/openaq.duckdb
+    DBT_PROJECT_DIR: /opt/airflow/openaq_dbt
+    DBT_PROFILES_DIR: /opt/airflow/openaq_dbt
+    DBT_SEND_ANONYMOUS_USAGE_STATS: "false"
   volumes:
     - ./dags:/opt/airflow/dags
     - ./Handler:/opt/airflow/Handler
+    - ./openaq_dbt:/opt/airflow/openaq_dbt
     - ./data:/opt/airflow/data         # openaq.duckdb tersimpan di host
     - ./logs:/opt/airflow/logs
   user: "50000:0"
