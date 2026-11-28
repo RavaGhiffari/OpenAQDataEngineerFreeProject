@@ -2,7 +2,9 @@ version: 2
 
 models:
   - name: dim_locations
-    description: Dimensi lokasi pemantauan; is_active = kirim data dalam 7 hari terakhir.
+    description: >
+      Dimensi lokasi pemantauan. is_active = kirim data dalam 7 hari sebelum as_of_utc
+      (var `as_of_utc` dari Airflow = data_interval_end; tanpa var = now()).
     columns:
       - name: location_id
         data_tests: [unique, not_null]

@@ -19,6 +19,13 @@ sources:
           - name: sensor_id
             data_tests: [unique, not_null]
       - name: measurements_hourly
+        # Ukur kebaruan DATA (jam pengukuran terakhir), bukan kapan loader jalan:
+        # loader bisa sukses tapi API tidak mengirim jam baru. Normalnya telat ~2 jam.
+        config:
+          loaded_at_field: datetime_from_utc
+          freshness:
+            warn_after: {count: 1, period: day}
+            error_after: {count: 3, period: day}
         columns:
           - name: sensor_id
             data_tests: [not_null]
