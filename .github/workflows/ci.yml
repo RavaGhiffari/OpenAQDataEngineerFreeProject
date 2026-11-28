@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      # DuckDB sementara di runner; tidak ada data asli dan tidak butuh API key.
+      OPENAQ_DB_PATH: ${{ github.workspace }}/ci.duckdb
+      DBT_PROFILES_DIR: ${{ github.workspace }}/openaq_dbt
+      DBT_SEND_ANONYMOUS_USAGE_STATS: "false"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Unit test (Handler)
+        run: pytest -v
+
+      - name: Buat schema raw kosong
+        run: python -c "from Handler.loader import connect; connect().close()"
+
+      # Memastikan semua model terkompilasi dan jalan di DuckDB, dan test dbt valid.
+      # Tabel raw kosong, jadi test data lolos trivial; source freshness sengaja tidak dijalankan.
+      - name: dbt build (DB kosong)
+        working-directory: openaq_dbt
+        run: dbt build --vars '{"as_of_utc": "2026-01-01T00:00:00+00:00"}'

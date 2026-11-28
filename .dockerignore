@@ -10,3 +10,6 @@ openaq_dbt/target/
 openaq_dbt/logs/
 openaq_dbt/dbt_packages/
 scripts/
+tests/
+.github/
+pyproject.toml
