@@ -8,7 +8,9 @@ with daily as (
         avg(pm25_ugm3)                   as pm25_avg,
         max(pm25_ugm3)                   as pm25_max,
         min(pm25_ugm3)                   as pm25_min,
-        count(*)                         as n_hours,
+        -- jam unik, bukan count(*): lokasi dengan 2 sensor bisa punya 48 baris per hari
+        count(distinct date_trunc('hour', measured_at_local))  as n_hours,
+        count(*)                         as n_sensor_hours,
         count(distinct sensor_id)        as n_sensors
     from {{ ref('fct_pm25_hourly') }}
     group by all
